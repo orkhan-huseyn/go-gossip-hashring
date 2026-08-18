@@ -2,7 +2,6 @@ package main
 
 import (
 	"flag"
-	"fmt"
 	"hash/crc32"
 	"log"
 	"os"
@@ -30,20 +29,18 @@ var targets = []string{
 }
 
 // ---------------------------------------------------------------------
-// 1. Thread-Safe Consistent Hash Ring
+// 1. Thread-Safe Consistent Hash Ring (No Virtual Nodes)
 // ---------------------------------------------------------------------
 
 type HashRing struct {
-	mu       sync.RWMutex
-	replicas int
-	ring     []uint32
-	nodes    map[uint32]string
+	mu    sync.RWMutex
+	ring  []uint32
+	nodes map[uint32]string
 }
 
-func NewHashRing(replicas int) *HashRing {
+func NewHashRing() *HashRing {
 	return &HashRing{
-		replicas: replicas,
-		nodes:    make(map[uint32]string),
+		nodes: make(map[uint32]string),
 	}
 }
 
@@ -51,11 +48,14 @@ func (h *HashRing) Add(node string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	for i := 0; i < h.replicas; i++ {
-		hash := crc32.ChecksumIEEE([]byte(fmt.Sprintf("%s-%d", node, i)))
-		h.ring = append(h.ring, hash)
-		h.nodes[hash] = node
+	hash := crc32.ChecksumIEEE([]byte(node))
+
+	if _, exists := h.nodes[hash]; exists {
+		return
 	}
+
+	h.ring = append(h.ring, hash)
+	h.nodes[hash] = node
 
 	sort.Slice(h.ring, func(i, j int) bool { return h.ring[i] < h.ring[j] })
 }
@@ -64,14 +64,17 @@ func (h *HashRing) Remove(node string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	for i := 0; i < h.replicas; i++ {
-		hash := crc32.ChecksumIEEE([]byte(fmt.Sprintf("%s-%d", node, i)))
-		delete(h.nodes, hash)
+	hash := crc32.ChecksumIEEE([]byte(node))
 
-		idx := sort.Search(len(h.ring), func(j int) bool { return h.ring[j] >= hash })
-		if idx < len(h.ring) && h.ring[idx] == hash {
-			h.ring = append(h.ring[:idx], h.ring[idx+1:]...)
-		}
+	if _, exists := h.nodes[hash]; !exists {
+		return
+	}
+
+	delete(h.nodes, hash)
+
+	idx := sort.Search(len(h.ring), func(j int) bool { return h.ring[j] >= hash })
+	if idx < len(h.ring) && h.ring[idx] == hash {
+		h.ring = append(h.ring[:idx], h.ring[idx+1:]...)
 	}
 }
 
@@ -85,6 +88,7 @@ func (h *HashRing) GetOwner(key string) string {
 
 	hash := crc32.ChecksumIEEE([]byte(key))
 	idx := sort.Search(len(h.ring), func(i int) bool { return h.ring[i] >= hash })
+
 	if idx == len(h.ring) {
 		idx = 0
 	}
@@ -126,7 +130,7 @@ func main() {
 		log.Fatal("Must specify a node name with -name flag")
 	}
 
-	ring := NewHashRing(50)
+	ring := NewHashRing()
 	config := memberlist.DefaultLocalConfig()
 	config.Name = *nodeName
 	config.BindPort = *port
